@@ -13,6 +13,7 @@ export interface TournamentRoomSettings {
 	autostart?: number | boolean;
 	forcePublic?: boolean;
 	forceTimer?: boolean;
+	teamlock?: boolean;
 	playerCap?: number;
 	recentToursLength?: number;
 	recentTours?: { name: string, baseFormat: string, time: number }[];
@@ -58,6 +59,8 @@ export class TournamentPlayer extends Rooms.RoomGamePlayer<Tournament> {
 	isDisqualified: boolean;
 	isEliminated: boolean;
 	autoDisqualifyWarned: boolean;
+	lockedTeam: string | null;
+	firstBattleTeam: string | null;
 	lastActionTime: number;
 	wins: number;
 	losses: number;
@@ -72,6 +75,8 @@ export class TournamentPlayer extends Rooms.RoomGamePlayer<Tournament> {
 		this.isDisqualified = false;
 		this.isEliminated = false;
 		this.autoDisqualifyWarned = false;
+		this.lockedTeam = null;
+		this.firstBattleTeam = null;
 		this.lastActionTime = 0;
 
 		this.wins = 0;
@@ -101,6 +106,7 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 	forceTimer: boolean;
 	autostartcap: boolean;
 	forcePublic: boolean;
+	lockTournamentTeams: boolean;
 	isTournamentStarted: boolean;
 	isBracketInvalidated: boolean;
 	lastBracketUpdate: number;
@@ -141,11 +147,16 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 		this.forceTimer = false;
 		this.autostartcap = false;
 		this.forcePublic = false;
+		this.lockTournamentTeams = false;
 		if (Config.tourdefaultplayercap && this.playerCap > Config.tourdefaultplayercap) {
 			Monitor.log(`[TourMonitor] Room ${room.roomid} starting a tour over default cap (${this.playerCap})`);
 		}
 
 		this.isTournamentStarted = false;
+
+		if (this.room.settings.tournaments?.teamlock) {
+			this.lockTournamentTeams = true;
+		}
 
 		this.isBracketInvalidated = true;
 		this.lastBracketUpdate = 0;
@@ -651,6 +662,15 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 
 		this.generator.freezeBracket(this.players);
 
+		if (this.lockTournamentTeams) {
+			for (const player of this.players) {
+				const user = Users.get(player.id);
+				if (user) {
+					player.lockedTeam = user.battleSettings.team;
+				}
+			}
+		}
+
 		const now = Date.now();
 		for (const user of this.players) {
 			user.lastActionTime = now;
@@ -915,6 +935,10 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 		this.forcePublic = force;
 		this.room.add(`Tournament battles forced public: ${force ? 'ON' : 'OFF'}`);
 	}
+	setTeamLock(lock: boolean) {
+		this.lockTournamentTeams = lock;
+		this.room.add(`Tournament teamlock: ${lock ? 'ON' : 'OFF'}`);
+	}
 	setAutostartAtCap(autostart: boolean) {
 		this.autostartcap = true;
 		this.room.add(`The tournament will start once ${this.playerCap} players have joined.`);
@@ -949,6 +973,14 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 			return;
 		}
 
+		if (this.lockTournamentTeams && from.lockedTeam) {
+			const teamUser = Users.get(from.id);
+			if (teamUser && teamUser.battleSettings.team !== from.lockedTeam) {
+				output.sendReply(`Teamlock is on: Your team cannot be changed mid-tournament.`);
+				return;
+			}
+		}
+
 		from.isBusy = true;
 		to.isBusy = true;
 
@@ -963,6 +995,18 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 			this.isAvailableMatchesInvalidated = true;
 			this.update();
 			return;
+		}
+
+		if (this.lockTournamentTeams && from.firstBattleTeam) {
+			if (ready.settings.team !== from.firstBattleTeam) {
+				output.sendReply(`Teamlock is on: Your team must remain the same throughout the tournament.`);
+				from.isBusy = false;
+				to.isBusy = false;
+
+				this.isAvailableMatchesInvalidated = true;
+				this.update();
+				return;
+			}
 		}
 
 		to.lastActionTime = Date.now();
@@ -1030,6 +1074,22 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 		if (!challenge.from.pendingChallenge) return;
 		if (!player.pendingChallenge) return;
 
+		// Check TeamLock for the challenger
+		if (this.lockTournamentTeams && challenge.from.firstBattleTeam) {
+			if (challenge.team !== challenge.from.firstBattleTeam) {
+				player.sendRoom(`|tournament|message|${challenge.from.name}'s team doesn't match original team. Cancelling challenge.`);
+				return;
+			}
+		}
+
+		// Check TeamLock for the acceptor
+		if (this.lockTournamentTeams && player.firstBattleTeam) {
+			if (ready.settings.team !== player.firstBattleTeam) {
+				output.sendReply(`Teamlock is on: Your team must remain the same throughout the tournament.`);
+				return;
+			}
+		}
+
 		const room = Rooms.createBattle({
 			format: this.fullFormat,
 			isPrivate: this.room.settings.isPrivate,
@@ -1057,6 +1117,15 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 
 		// server lockdown
 		if (!room) return;
+
+		if (this.lockTournamentTeams) {
+			if (!challenge.from.firstBattleTeam) {
+				challenge.from.firstBattleTeam = challenge.team;
+			}
+			if (!player.firstBattleTeam) {
+				player.firstBattleTeam = ready.settings.team;
+			}
+		}
 
 		challenge.from.inProgressMatch = { to: player, room };
 		this.room.add(`|tournament|battlestart|${from.name}|${user.name}|${room.roomid}`).update();
@@ -1175,6 +1244,14 @@ export class Tournament extends Rooms.RoomGame<TournamentPlayer> {
 			bracketData: this.getBracketData(),
 		};
 		this.room.add(`|tournament|end|${JSON.stringify(update)}`);
+
+		// Clear firstBattleTeam data for teamlock
+		if (this.lockTournamentTeams) {
+			for (const player of this.players) {
+				player.firstBattleTeam = null;
+			}
+		}
+
 		const settings = this.room.settings.tournaments;
 		if (settings?.recentToursLength) {
 			if (!settings.recentTours) settings.recentTours = [];
@@ -1991,6 +2068,24 @@ const commands: Chat.ChatCommands = {
 				return this.sendReply(`Usage: /tour ${cmd} <on|off>`);
 			}
 		},
+		teamlock(target, room, user, connection, cmd) {
+			room = this.requireRoom();
+			this.checkCan('tournaments', null, room);
+			const tournament = this.requireGame(Tournament);
+			target = target.trim();
+			const option = target ? target.toLowerCase() : 'on';
+			if (this.meansYes(option)) {
+				tournament.setTeamLock(true);
+				this.privateModAction(`Tournament teamlock was turned on by ${user.name}`);
+				this.modlog('TOUR TEAMLOCK', null, 'ON');
+			} else if (this.meansNo(option) || option === 'stop') {
+				tournament.setTeamLock(false);
+				this.privateModAction(`Tournament teamlock was turned off by ${user.name}`);
+				this.modlog('TOUR TEAMLOCK', null, 'OFF');
+			} else {
+				return this.sendReply(`Usage: /tour ${cmd} <on|off>`);
+			}
+		},
 		settings: {
 			modjoin(target, room, user) {
 				room = this.requireRoom();
@@ -2306,6 +2401,35 @@ const commands: Chat.ChatCommands = {
 					this.modlog('TOUR SETTINGS', null, `recent tour block: off`);
 				}
 			},
+			teamlock(target, room, user) {
+				room = this.requireRoom();
+				this.checkCan('declare', null, room);
+				target = toID(target);
+				if (!target || (!this.meansYes(target) && !this.meansNo(target))) {
+					if (room.settings.tournaments?.teamlock) {
+						this.sendReply(`Teamlock is currently ${room.settings.tournaments.teamlock ? '' : 'NOT '} enabled for tournaments.`);
+					}
+					return this.parse(`/help tour settings`);
+				}
+				room.settings.tournaments ||= {};
+				if (this.meansYes(target)) {
+					if (room.settings.tournaments.teamlock) {
+						throw new Chat.ErrorMessage(`Teamlock is already enabled for tournaments.`);
+					}
+					room.settings.tournaments.teamlock = true;
+					room.saveSettings();
+					this.privateModAction(`Teamlock was enabled for tournaments by ${user.name}.`);
+					this.modlog('TOUR SETTINGS', null, `lock teams: on`);
+				} else {
+					if (!room.settings.tournaments.teamlock) {
+						throw new Chat.ErrorMessage(`Teamlock is already disabled for tournaments.`);
+					}
+					delete room.settings.tournaments.teamlock;
+					room.saveSettings();
+					this.privateModAction(`Teamlock was disabled for tournaments by ${user.name}.`);
+					this.modlog('TOUR SETTINGS', null, `lock teams: off`);
+				}
+			},
 			'': 'help',
 			help() {
 				this.parse(`${this.cmdToken}help tour settings`);
@@ -2320,6 +2444,7 @@ const commands: Chat.ChatCommands = {
 				`<code>/tour settings autostart &lt;on|minutes|off></code> - Sets the automatic start timeout for every tournament.<br />` +
 				`<code>/tour settings forcepublic &lt;on|off></code> - Specifies whether users can hide their battles for every tournament.<br />` +
 				`<code>/tour settings forcetimer &lt;on|off></code> - Specifies whether users can toggle the timer for every tournament.<br />` +
+				`<code>/tour settings teamlock &lt;on|off></code> - Specifies whether users can switch teams between battles or not.`	+
 				`<code>/tour settings modjoin &lt;on|off></code> - Specifies whether users can modjoin their battles for every tournament.<br />`	+
 				`<code>/tour settings autoconfirmedonly&lt;on|off></code> - Set requirement for signups for this tournament. If this is on, only autoconfirmed users can join a tournament.<br />`	+
 				`<code>/tour settings playercap &lt;number></code> - Sets the playercap for every tournament.<br />` +
@@ -2352,6 +2477,7 @@ const commands: Chat.ChatCommands = {
 			`- modjoin &lt;allow|disallow>: Specifies whether players can modjoin their battles.<br />` +
 			`- forcetimer &lt;on|off>: Turn on the timer for tournament battles.<br />` +
 			`- forcepublic &lt;on|off>: Forces tournament battles and their replays to be public.<br />` +
+			`- teamlock &lt;on|off>: Prevents players from changing their team mid-tournament.` +
 			`- getusers: Lists the users in the current tournament.<br />` +
 			`- announce/announcements &lt;on|off>: Enables/disables tournament announcements for the current room.<br />` +
 			`- banuser/unbanuser &lt;user>: Bans/unbans a user from joining tournaments in this room. Lasts 2 weeks.<br />` +
@@ -2423,6 +2549,14 @@ const roomSettings: Chat.SettingsHandler[] = [
 		options: [
 			['on', room.settings.tournaments?.blockRecents || 'tour settings blockrecents on'],
 			['off', !room.settings.tournaments?.blockRecents || 'tour settings blockrecents off'],
+		],
+	}),
+	room => ({
+		label: "Tournament Teamlock",
+		permission: "editroom",
+		options: [
+			['on', room.settings.tournaments?.teamlock || 'tour settings teamlock on'],
+			['off', !room.settings.tournaments?.teamlock || 'tour settings teamlock off'],
 		],
 	}),
 ];
