@@ -398,7 +398,8 @@ export class TeamValidator {
 		if (!team) {
 			return [
 				`This format requires you to use your own team.`,
-				`If you're not using a custom client, please report this as a bug.`,
+				`Are you using a team you uploaded to a different account?`,
+				`If you're not, and aren't using a custom client, please report this as a bug.`,
 			];
 		}
 		if (!Array.isArray(team)) {
