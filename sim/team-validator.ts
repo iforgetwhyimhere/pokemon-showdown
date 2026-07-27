@@ -586,7 +586,8 @@ export class TeamValidator {
 			if (set.name === set.species) {
 				set.name = species.baseSpecies;
 			} else {
-				problems.push(`Nickname "${set.name}" too long (should be 18 characters or fewer)`);
+				problems.push(`Nickname "${set.name}" too long` +
+					`(should be 18 characters or less, currently ${set.name.length})`);
 			}
 		}
 		set.name = dex.getName(set.name);
