@@ -1,4 +1,4 @@
-export const Pokedex: import('../../../sim/dex-species').ModdedLearnsetDataTable = {
+export const Learnsets: import('../../../sim/dex-species').ModdedLearnsetDataTable = {
 	rudinn: {
 		learnset: {
 			airslash: ["9L1"],
