@@ -1050,8 +1050,9 @@ export class CommandContext extends MessageContext {
 		this.commandDoesNotExist();
 	}
 	canUseConsole() {
+		if (!Config.consoleips) throw new Chat.ErrorMessage(`${(this.cmdToken + this.fullCmd).trim()} - The developer console is currently disabled.`);
 		if (!this.user.hasConsoleAccess(this.connection)) {
-			throw new Chat.ErrorMessage(`${(this.cmdToken + this.fullCmd).trim()} - Requires console access, please set up \`Config.consoleips\`.`);
+			throw new Chat.ErrorMessage(`${(this.cmdToken + this.fullCmd).trim()} - Requires console access${Config.serverid ? '' : ', please set up `Config.consoleips`'}.`);
 		}
 		return true;
 	}
